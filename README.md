@@ -5,6 +5,13 @@
 
 Скрипт **автоматически находит последний релиз** на GitHub, выбирает архив для нужной архитектуры, скачивает его и заменяет существующий бинарный файл `/usr/bin/sing-box`.
 
+# Установка
+
+Для установки и обновления используем команду
+```
+sh <(wget -O - https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh)
+```
+
 ### Что делает скрипт
 
 1.  **Поиск последнего релиза:** Обращается к API GitHub, чтобы найти URL "latest release".
