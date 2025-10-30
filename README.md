@@ -1,4 +1,4 @@
-# OpenWRT-sing-box-extended
+# Sing-box to sing-box-extended replacer
 Скрипт для установки sing-box-extended вместо стандартного sing-box (для OpenWRT и ему подобных)
 
 Этот `sh`-скрипт предназначен для автоматического обновления бинарного файла `sing-box` на роутерах OpenWrt. Он использует форк [shtorm-7/sing-box-extended](https://github.com/shtorm-7/sing-box-extended).
