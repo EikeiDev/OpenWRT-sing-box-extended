@@ -18,6 +18,6 @@ sh <(wget -O - https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-exten
 
 -----
 
-# Благодарности / Thanks
+# Благодарности
 
 https://github.com/shtorm-7/sing-box-extended
