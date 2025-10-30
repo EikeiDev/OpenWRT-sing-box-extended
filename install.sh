@@ -10,7 +10,9 @@ DEST_FILE="/usr/bin/sing-box"
 
 echo "[*] Ищу последнюю версию для $FILE_PATTERN..."
 
-DOWNLOAD_URL=$(wget -qO- "$API_URL" | grep "browser_download_url" | grep "$FILE_PATTERN" | awk -F '"' '{print $4}')
+# ИСПРАВЛЕНИЕ: Разбиваем JSON на строки с помощью 'tr' 
+# и используем связку grep/awk для надежного парсинга
+DOWNLOAD_URL=$(wget -qO- "$API_URL" | tr ',' '\n' | grep "browser_download_url" | grep "$FILE_PATTERN" | awk -F '"' '{print $4}')
 
 if [ -z "$DOWNLOAD_URL" ]; then
     echo "[!] ОШИБКА: Не смог найти URL для скачивания."
@@ -32,21 +34,26 @@ echo "[*] Гашу старый sing-box... (если он запущен)"
 service sing-box stop >/dev/null 2>&1 || true
 killall sing-box >/dev/null 2>&1 || true
 
-echo "[*] Распаковываю..."
-tar -xzf "$ARCHIVE_NAME" --strip-components=1 --wildcards '*/sing-box'
+echo "[*] Распаковываю архив (полностью)..."
+tar -xzf "$ARCHIVE_NAME"
 
-if [ ! -f "sing-box" ]; then
-    echo "[!] ОШИБКА: Архив скачался, но внутри нет файла 'sing-box'!"
+echo "[*] Ищу бинарный файл..."
+BINARY_PATH=$(find . -type f -name sing-box | head -n 1)
+
+if [ -z "$BINARY_PATH" ]; then
+    echo "[!] ОШИБКА: Архив распаковался, но внутри нет файла 'sing-box'!"
     exit 1
 fi
 
+echo "[+] Файл найден: $BINARY_PATH"
+
 echo "[*] Ставлю новый бинарник в $DEST_FILE..."
-mv "sing-box" "$DEST_FILE"
+mv "$BINARY_PATH" "$DEST_FILE"
 
 echo "[*] Даю права на запуск..."
 chmod +x "$DEST_FILE"
 
-echo "[*] Убираю за собой мусор (архив и папку)..."
+echo "[*] Убираю за собой мусор (архив и распакованные папки)..."
 cd /
 rm -rf "$TMP_DIR"
 
