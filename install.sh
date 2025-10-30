@@ -10,8 +10,6 @@ DEST_FILE="/usr/bin/sing-box"
 
 echo "[*] Ищу последнюю версию для $FILE_PATTERN..."
 
-# ИСПРАВЛЕНИЕ: Разбиваем JSON на строки с помощью 'tr' 
-# и используем связку grep/awk для надежного парсинга
 DOWNLOAD_URL=$(wget -qO- "$API_URL" | tr ',' '\n' | grep "browser_download_url" | grep "$FILE_PATTERN" | awk -F '"' '{print $4}')
 
 if [ -z "$DOWNLOAD_URL" ]; then
