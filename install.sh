@@ -1,6 +1,6 @@
 #!/bin/sh
 
-API_URL="https://api.github.com/repos/shtorm-7/sing-box-extended/releases/latest"
+API_URL="https://api.github.com/repos/kirill78178/sing-box-extended/releases/latest"
 ARCHIVE_NAME="sing-box-latest.tar.gz"
 DEST_FILE="/usr/bin/sing-box"
 
