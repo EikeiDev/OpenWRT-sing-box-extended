@@ -1,7 +1,6 @@
 #!/bin/sh
 
 API_URL="https://api.github.com/repos/shtorm-7/sing-box-extended/releases?per_page=30"
-ARCHIVE_NAME="sing-box-latest.tar.gz"
 DEST_FILE="/usr/bin/sing-box"
 
 R="\033[1;31m"
@@ -20,15 +19,43 @@ fail() {
 }
 
 if command -v curl >/dev/null 2>&1; then
-    FETCH="curl -fsSL --insecure --connect-timeout 15"
+    FETCH_TYPE="curl"
+    FETCH="curl -sSL --insecure --connect-timeout 15"
     DOWNLOAD="curl -fsSL --insecure --connect-timeout 15 -o"
 elif command -v wget >/dev/null 2>&1; then
+    FETCH_TYPE="wget"
     FETCH="wget -qO- --no-check-certificate --timeout=15"
     DOWNLOAD="wget -q --no-check-certificate --timeout=15 -O"
 else
     printf "${R}[!] ОШИБКА: Не найден curl или wget.${N}\n"
     exit 1
 fi
+
+api_get() {
+    if [ -n "$GITHUB_TOKEN" ]; then
+        case "$FETCH_TYPE" in
+            curl) curl -sSL --insecure --connect-timeout 15 \
+                    -H "Authorization: token $GITHUB_TOKEN" "$1" 2>/dev/null ;;
+            wget) wget -qO- --no-check-certificate --timeout=15 \
+                    --header="Authorization: token $GITHUB_TOKEN" "$1" 2>/dev/null ;;
+        esac
+    else
+        $FETCH "$1" 2>/dev/null
+    fi
+}
+
+read_token() {
+    if stty -echo 2>/dev/null; then
+        printf "${C}%s (ввод скрыт): ${N}" "$1"
+        read -r -t 30 GITHUB_TOKEN
+        stty echo 2>/dev/null
+        printf "\n"
+    else
+        printf "${C}%s (ввод будет виден): ${N}" "$1"
+        read -r -t 30 GITHUB_TOKEN
+    fi
+    GITHUB_TOKEN=$(printf '%s' "$GITHUB_TOKEN" | tr -d ' \t\n\r')
+}
 
 if [ -f "/opt/etc/init.d/podkop" ] || [ -f "/etc/init.d/podkop" ]; then
     SERVICE_NAME="podkop"
@@ -76,16 +103,47 @@ case $HOST_ARCH in
     ;;
 esac
 
+case $ARCH_SUFFIX in
+    mips-softfloat | mipsle-softfloat | mips64 | mips64le) USE_COMPRESSED="0" ;;
+    *) USE_COMPRESSED="1" ;;
+esac
+
 CURRENT_VER=""
 if [ -f "$DEST_FILE" ]; then
     CURRENT_VER=$("$DEST_FILE" version 2>/dev/null | head -n 1 | awk '{print $NF}') || true
 fi
 
+GITHUB_TOKEN=""
+printf "${C}[>] Использовать GitHub токен (y/N)? ${N}"
+read -r -t 30 _use_token
+if [ "$_use_token" = "y" ] || [ "$_use_token" = "Y" ]; then
+    read_token "[>] Введите токен"
+fi
+
 printf "${C}[*] Получаю список последних версий...${N}\n"
-API_RESPONSE=$($FETCH "$API_URL" 2>/dev/null) || true
+API_RESPONSE=$(api_get "$API_URL") || true
 
 if [ -z "$API_RESPONSE" ]; then
     fail "Не удалось подключиться к GitHub API. Проверьте соединение."
+fi
+
+if ! printf '%s' "$API_RESPONSE" | grep -q '"tag_name"'; then
+    if printf '%s' "$API_RESPONSE" | grep -qi "rate limit"; then
+        printf "${R}[!] Лимит запросов к GitHub API исчерпан.${N}\n"
+    elif printf '%s' "$API_RESPONSE" | grep -qi "bad credentials\|401"; then
+        printf "${R}[!] Токен недействителен или отозван. Создайте новый на github.com/settings/tokens${N}\n"
+    else
+        printf "${R}[!] Неожиданный ответ от GitHub API.${N}\n"
+    fi
+    if [ -z "$GITHUB_TOKEN" ]; then
+        read_token "[>] Введите GitHub токен для продолжения"
+    fi
+    [ -z "$GITHUB_TOKEN" ] && fail "Токен не введён. Установка прервана."
+    printf "${C}[*] Повторяю запрос с токеном...${N}\n"
+    API_RESPONSE=$(api_get "$API_URL") || true
+    if [ -z "$API_RESPONSE" ] || ! printf '%s' "$API_RESPONSE" | grep -q '"tag_name"'; then
+        fail "Не удалось получить список релизов. Проверьте токен или попробуйте позже."
+    fi
 fi
 
 RELEASES=$(echo "$API_RESPONSE" \
@@ -96,6 +154,14 @@ RELEASES=$(echo "$API_RESPONSE" \
   | grep -v -i "beta" \
   | grep -v -i "alpha" \
   | head -n 3)
+
+ALL_RELEASES=$(echo "$API_RESPONSE" \
+  | tr ',' '\n' \
+  | grep '"tag_name"' \
+  | awk -F '"' '{print $4}' \
+  | grep -v -i "rc" \
+  | grep -v -i "beta" \
+  | grep -v -i "alpha")
 
 if [ -z "$RELEASES" ]; then
     fail "Не удалось получить список стабильных релизов из API."
@@ -109,8 +175,8 @@ for tag in $RELEASES; do
 done
 printf "  ${Y}0)${N} Отмена\n"
 
-printf "\n${C}[?] Выберите версию (0-$((i-1))): ${N}"
-read -r choice
+printf "\n${C}[>] Выберите версию (0-$((i-1))): ${N}"
+read -r -t 60 choice
 
 if [ "$choice" = "0" ]; then
     printf "${G}[*] Установка отменена.${N}\n"
@@ -139,38 +205,73 @@ if [ -n "$CURRENT_VER" ] && [ "$CURRENT_VER" = "$SELECTED_VER" ]; then
     printf "${Y}[!] Эта версия уже установлена. Выполняю переустановку...${N}\n"
 fi
 
+get_url_from_assets() {
+    local _al="$1" _url=""
+    if [ "$USE_PKG" = "1" ]; then
+        _url=$(echo "$_al" | grep "browser_download_url" \
+          | grep "sing-box-extended_.*_openwrt_${DISTRIB_ARCH}\.${PKG_EXT}" \
+          | head -n 1 | awk -F '"' '{print $4}')
+        [ -n "$_url" ] && { echo "1:$_url"; return 0; }
+    fi
+    if [ "$USE_COMPRESSED" = "1" ]; then
+        _url=$(echo "$_al" | grep "browser_download_url" \
+          | grep "linux-$ARCH_SUFFIX-compressed\.tar\.gz" \
+          | head -n 1 | awk -F '"' '{print $4}')
+    fi
+    if [ -z "$_url" ]; then
+        _url=$(echo "$_al" | grep "browser_download_url" \
+          | grep "linux-$ARCH_SUFFIX\.tar\.gz" \
+          | grep -v "compressed" \
+          | head -n 1 | awk -F '"' '{print $4}')
+    fi
+    echo "0:$_url"
+    [ -n "$_url" ]
+}
+
+get_url_for_tag() {
+    local _tag="$1" _lines
+    _lines=$(echo "$API_RESPONSE" | tr ',' '\n' | awk -v tag="\"$_tag\"" '
+        /\"tag_name\":/ { in_rel = (index($0, tag) > 0) }
+        in_rel && /browser_download_url/ { print }
+    ')
+    if [ -z "$_lines" ]; then
+        local _resp
+        _resp=$(api_get "https://api.github.com/repos/shtorm-7/sing-box-extended/releases/tags/$_tag") || true
+        [ -z "$_resp" ] && { echo "0:"; return 1; }
+        _lines=$(echo "$_resp" | tr ',' '\n')
+    fi
+    get_url_from_assets "$_lines"
+}
+
+parse_url_result() {
+    IS_PKG_INSTALL="${1%%:*}"
+    DOWNLOAD_URL="${1#*:}"
+}
+
 printf "${C}[*] Ищу ссылку на скачивание для версии $SELECTED_TAG...${N}\n"
 
-RELEASE_URL="https://api.github.com/repos/shtorm-7/sing-box-extended/releases/tags/$SELECTED_TAG"
-RELEASE_RESPONSE=$($FETCH "$RELEASE_URL" 2>/dev/null) || true
-
 IS_PKG_INSTALL="0"
-if [ "$USE_PKG" = "1" ]; then
-    DISTRIB_ARCH=$(. /etc/openwrt_release && echo "$DISTRIB_ARCH")
-    FILE_PATTERN="sing-box-extended_.*_openwrt_${DISTRIB_ARCH}\.${PKG_EXT}"
-    DOWNLOAD_URL=$(echo "$RELEASE_RESPONSE" \
-      | tr ',' '\n' \
-      | grep "browser_download_url" \
-      | grep "$FILE_PATTERN" \
-      | head -n 1 \
-      | awk -F '"' '{print $4}')
-    if [ -n "$DOWNLOAD_URL" ]; then
-        IS_PKG_INSTALL="1"
-    fi
-fi
+DOWNLOAD_URL=""
+parse_url_result "$(get_url_for_tag "$SELECTED_TAG")"
 
-if [ "$IS_PKG_INSTALL" = "0" ]; then
-    FILE_PATTERN="linux-$ARCH_SUFFIX.tar.gz"
-    DOWNLOAD_URL=$(echo "$RELEASE_RESPONSE" \
-      | tr ',' '\n' \
-      | grep "browser_download_url" \
-      | grep "$FILE_PATTERN" \
-      | head -n 1 \
-      | awk -F '"' '{print $4}')
+if [ -z "$DOWNLOAD_URL" ]; then
+    printf "${Y}[!] Архитектура '$ARCH_SUFFIX' не найдена в $SELECTED_TAG. Ищу в более старых релизах...${N}\n"
+    for _fb_tag in $ALL_RELEASES; do
+        [ "$_fb_tag" = "$SELECTED_TAG" ] && continue
+        _fb_result=$(get_url_for_tag "$_fb_tag")
+        _fb_url="${_fb_result#*:}"
+        if [ -n "$_fb_url" ]; then
+            parse_url_result "$_fb_result"
+            SELECTED_TAG="$_fb_tag"
+            SELECTED_VER=$(echo "$SELECTED_TAG" | sed 's/^v//')
+            printf "${Y}[!] Найдена совместимая версия: ${SELECTED_VER}${N}\n"
+            break
+        fi
+    done
 fi
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    fail "Файл для архитектуры '$HOST_ARCH' ($ARCH_SUFFIX / ${DISTRIB_ARCH:-н/д}) не найден в релизе $SELECTED_TAG."
+    fail "Файл для архитектуры '$HOST_ARCH' ($ARCH_SUFFIX / ${DISTRIB_ARCH:-н/д}) не найден ни в одном из доступных релизов."
 fi
 
 if [ "$IS_PKG_INSTALL" = "1" ]; then
@@ -178,9 +279,6 @@ if [ "$IS_PKG_INSTALL" = "1" ]; then
 else
     ARCHIVE_NAME="sing-box-latest.tar.gz"
 fi
-
-sync
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 
 REQ_TEMP_KB=40960
 REQ_DEST_KB=25600
@@ -311,6 +409,6 @@ rm -rf "$WORK_DIR"
 WORK_DIR=""
 
 SERVICE_STOPPED=""
-service "$SERVICE_NAME" start
+service "$SERVICE_NAME" start || printf "${Y}[!] Не удалось запустить сервис '$SERVICE_NAME'. Запустите вручную.${N}\n"
 
 printf "${G}[+] Готово: ${Y}${CURRENT_VER:-н/д}${G} -> ${Y}${NEW_VERSION:-н/д}${N}\n"
