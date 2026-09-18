@@ -471,7 +471,7 @@ printf "  Релиз:          ${Y}%s${N}\n" "$SELECTED_TAG"
 printf "  Тип:            ${Y}%s${N}\n" "$INSTALL_MODE"
 printf "  Нужно временно: ${Y}%s МБ${N}\n" "$((REQ_TEMP_KB / 1024))"
 if [ "$REQ_DEST_KB" -gt 0 ]; then
-    printf "  Нужно бинарнику:${Y} %s МБ${N}\n" "$((REQ_DEST_KB / 1024))"
+    printf "  Ориентир бинарника:${Y} %s МБ${N} (логический размер)\n" "$((REQ_DEST_KB / 1024))"
 else
     printf "  Место установки:${Y} проверит %s${N}\n" "$PKG_MANAGER"
 fi
@@ -485,21 +485,58 @@ get_free_space_kb() {
     esac
 }
 
-if [ "$REQ_DEST_KB" -gt 0 ]; then
-    DEST_DIR=$(dirname "$DEST_FILE")
-    DEST_FREE_KB=$(get_free_space_kb "$DEST_DIR")
-    EXISTING_SIZE_KB=0
-    if [ -f "$DEST_FILE" ] && [ ! -L "$DEST_FILE" ]; then
-        EXISTING_SIZE_KB=$(du -k "$DEST_FILE" 2>/dev/null | awk '{print $1}')
-        case "$EXISTING_SIZE_KB" in
-            ''|*[!0-9]*) EXISTING_SIZE_KB=0 ;;
+get_fs_type_for_path() {
+    local _path="$1" _fs
+
+    # BusyBox df обычно поддерживает -T, но на урезанных сборках может не поддерживать.
+    _fs=$(df -PT "$_path" 2>/dev/null | awk 'NR==2 {print $2}')
+
+    if [ -z "$_fs" ]; then
+        case "$_path" in
+            /tmp|/tmp/*)
+                _fs=$(awk '$2 == "/tmp" {print $3; exit}' /proc/mounts 2>/dev/null)
+                ;;
+            *)
+                _fs=$(awk '$2 == "/" {print $3; exit}' /proc/mounts 2>/dev/null)
+                ;;
         esac
     fi
-    TOTAL_DEST_AVAILABLE=$((DEST_FREE_KB + EXISTING_SIZE_KB))
 
-    if [ "$TOTAL_DEST_AVAILABLE" -lt "$REQ_DEST_KB" ]; then
-        fail "Недостаточно места в $DEST_DIR. Доступно: $((TOTAL_DEST_AVAILABLE / 1024)) МБ, требуется: $((REQ_DEST_KB / 1024)) МБ."
-    fi
+    # На OpenWrt / обычно overlay, а реальная writable-ФС смонтирована в /overlay.
+    case "$_fs" in
+        overlay|overlayfs)
+            _fs=$(awk '$2 == "/overlay" {print $3; exit}' /proc/mounts 2>/dev/null)
+            [ -n "$_fs" ] || _fs="overlay"
+            ;;
+    esac
+
+    echo "${_fs:-unknown}"
+}
+
+is_transparently_compressed_fs() {
+    case "$1" in
+        ubifs|jffs2)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# ВАЖНО: для UBIFS/JFFS2 и других сжимающих ФС нельзя надежно сравнивать
+# логический размер бинарника с результатом df. Поэтому эта проверка только
+# диагностическая. Фактическую вместимость проверяем реальной записью ниже.
+DEST_DIR=$(dirname "$DEST_FILE")
+DEST_FREE_KB=$(get_free_space_kb "$DEST_DIR")
+DEST_SPACE_WARNING="0"
+
+if [ "$REQ_DEST_KB" -gt 0 ] && [ "$DEST_FREE_KB" -lt "$REQ_DEST_KB" ]; then
+    DEST_SPACE_WARNING="1"
+    printf "${Y}[!] По df в %s свободно около %s МБ, а логический размер может достигать %s МБ.${N}\n" \
+        "$DEST_DIR" "$((DEST_FREE_KB / 1024))" "$((REQ_DEST_KB / 1024))"
+    printf "${Y}[!] На сжимаемых ФС (например UBIFS) это не означает, что файл не поместится.${N}\n"
+    printf "${Y}[!] Жесткий отказ пропущен; итоговую проверку выполнит сама ФС при записи.${N}\n"
 fi
 
 FREE_RAM_KB=$(awk '/MemFree/ {print $2}' /proc/meminfo)
@@ -526,13 +563,36 @@ else
 fi
 
 WORK_DIR=""
+TEMP_SPACE_RELAXED="0"
 PREF_FREE_KB=$(get_free_space_kb "$PREF_PARENT")
+ALT_FREE_KB=$(get_free_space_kb "$ALT_PARENT")
+
 if [ "$PREF_FREE_KB" -ge "$REQ_TEMP_KB" ]; then
     WORK_DIR="$PREF_DIR"
+elif [ "$ALT_FREE_KB" -ge "$REQ_TEMP_KB" ]; then
+    WORK_DIR="$ALT_DIR"
 else
-    ALT_FREE_KB=$(get_free_space_kb "$ALT_PARENT")
-    if [ "$ALT_FREE_KB" -ge "$REQ_TEMP_KB" ]; then
-        WORK_DIR="$ALT_DIR"
+    # На UBIFS/JFFS2 величина из df не позволяет заранее вывести физический размер
+    # распакованного содержимого. Не отказываем только из-за сырой оценки: выбираем
+    # сжимаемую ФС с большим запасом и даем реальным download/tar операциям решить,
+    # помещаются ли данные фактически.
+    PREF_FS=$(get_fs_type_for_path "$PREF_PARENT")
+    ALT_FS=$(get_fs_type_for_path "$ALT_PARENT")
+
+    if is_transparently_compressed_fs "$PREF_FS" || is_transparently_compressed_fs "$ALT_FS"; then
+        if is_transparently_compressed_fs "$PREF_FS" && { ! is_transparently_compressed_fs "$ALT_FS" || [ "$PREF_FREE_KB" -ge "$ALT_FREE_KB" ]; }; then
+            WORK_DIR="$PREF_DIR"
+            WORK_FREE_KB="$PREF_FREE_KB"
+            WORK_FS="$PREF_FS"
+        else
+            WORK_DIR="$ALT_DIR"
+            WORK_FREE_KB="$ALT_FREE_KB"
+            WORK_FS="$ALT_FS"
+        fi
+        TEMP_SPACE_RELAXED="1"
+        printf "${Y}[!] Для временной папки сырая оценка места ниже %s МБ, но %s использует сжатие.${N}\n" \
+            "$((REQ_TEMP_KB / 1024))" "$WORK_FS"
+        printf "${Y}[!] Продолжаю без жесткого отказа; фактическую вместимость проверят скачивание и распаковка.${N}\n"
     fi
 fi
 
@@ -555,9 +615,145 @@ if [ ! -s "$ARCHIVE_NAME" ]; then
     fail "Скачанный файл пустой."
 fi
 
-stop_service_for_install
+same_filesystem() {
+    local _a _b _dev_a _dev_b
+    _a="$1"
+    _b="$2"
+    _dev_a=$(df -Pk "$_a" 2>/dev/null | awk 'NR==2 {print $1}')
+    _dev_b=$(df -Pk "$_b" 2>/dev/null | awk 'NR==2 {print $1}')
+    [ -n "$_dev_a" ] && [ "$_dev_a" = "$_dev_b" ]
+}
+
+verify_binary_version() {
+    local _file="$1" _expected="$2" _ver
+    _ver=$("$_file" version 2>/dev/null | head -n 1 | awk '{print $NF}') || true
+    [ -n "$_ver" ] && [ "$_ver" = "$_expected" ]
+}
+
+restore_binary_backup() {
+    local _backup="$1" _mode="$2"
+    rm -f "$DEST_FILE" 2>/dev/null || true
+    case "$_mode" in
+        gzip)
+            gzip -dc "$_backup" > "$DEST_FILE" 2>/dev/null || return 1
+            ;;
+        raw)
+            cp "$_backup" "$DEST_FILE" 2>/dev/null || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    chmod +x "$DEST_FILE" 2>/dev/null || true
+    return 0
+}
+
+install_archive_binary_safely() {
+    local _src="$1" _dst_dir _stage _backup _backup_mode _candidate_ver
+    _dst_dir=$(dirname "$DEST_FILE")
+    _stage="$_dst_dir/.sing-box.new.$$"
+    _backup="$WORK_DIR/.sing-box.rollback.$$"
+    _backup_mode=""
+
+    rm -f "$_stage" "$_backup" "$_backup.gz" 2>/dev/null || true
+
+    # Если рабочая папка и /usr/bin на одной ФС, rename() не требует второй
+    # копии файла и является лучшим вариантом для тесного flash-хранилища.
+    if same_filesystem "$_src" "$_dst_dir"; then
+        printf "${C}[*] Устанавливаю бинарник атомарным rename на той же ФС...${N}\n"
+        mv -f "$_src" "$DEST_FILE" || return 1
+        chmod +x "$DEST_FILE" || return 1
+        verify_binary_version "$DEST_FILE" "$SELECTED_VER" || return 1
+        return 0
+    fi
+
+    # Безопасный путь: сначала реально записываем новую копию рядом со старой.
+    # Это автоматически учитывает фактическое сжатие UBIFS/JFFS2.
+    printf "${C}[*] Проверяю фактическую вместимость записью на целевую ФС...${N}\n"
+    if cp "$_src" "$_stage" 2>/dev/null; then
+        chmod +x "$_stage" || { rm -f "$_stage"; return 1; }
+        if ! verify_binary_version "$_stage" "$SELECTED_VER"; then
+            rm -f "$_stage"
+            return 1
+        fi
+        mv -f "$_stage" "$DEST_FILE" || { rm -f "$_stage"; return 1; }
+        return 0
+    fi
+    rm -f "$_stage" 2>/dev/null || true
+
+    # Если рядом со старым бинарником новая копия не помещается, но старый файл
+    # существует, делаем rollback-копию ВНЕ целевой ФС (WORK_DIR здесь на другой
+    # ФС), освобождаем старые блоки и повторяем реальную запись.
+    if [ -f "$DEST_FILE" ] && [ ! -L "$DEST_FILE" ]; then
+        printf "${Y}[!] Для одновременного хранения старой и новой копии места недостаточно.${N}\n"
+        printf "${C}[*] Создаю rollback-копию текущего sing-box вне целевой ФС...${N}\n"
+
+        if command -v gzip >/dev/null 2>&1; then
+            if gzip -c "$DEST_FILE" > "$_backup.gz" 2>/dev/null && gzip -t "$_backup.gz" >/dev/null 2>&1; then
+                _backup="$_backup.gz"
+                _backup_mode="gzip"
+            else
+                rm -f "$_backup.gz" 2>/dev/null || true
+            fi
+        fi
+
+        if [ -z "$_backup_mode" ]; then
+            if cp "$DEST_FILE" "$_backup" 2>/dev/null; then
+                _backup_mode="raw"
+            else
+                rm -f "$_backup" 2>/dev/null || true
+            fi
+        fi
+
+        if [ -z "$_backup_mode" ]; then
+            printf "${R}[!] Не удалось создать безопасную rollback-копию. Старый бинарник не тронут.${N}\n"
+            return 1
+        fi
+
+        printf "${C}[*] Освобождаю место старого бинарника и повторяю запись...${N}\n"
+        rm -f "$DEST_FILE" || { rm -f "$_backup"; return 1; }
+        sync
+
+        if ! cp "$_src" "$_stage" 2>/dev/null; then
+            rm -f "$_stage" 2>/dev/null || true
+            printf "${R}[!] Новая версия не поместилась даже после освобождения старого файла. Восстанавливаю rollback...${N}\n"
+            restore_binary_backup "$_backup" "$_backup_mode" || return 2
+            rm -f "$_backup" 2>/dev/null || true
+            return 1
+        fi
+
+        chmod +x "$_stage" || {
+            rm -f "$_stage"
+            restore_binary_backup "$_backup" "$_backup_mode" || return 2
+            rm -f "$_backup" 2>/dev/null || true
+            return 1
+        }
+
+        if ! verify_binary_version "$_stage" "$SELECTED_VER"; then
+            rm -f "$_stage"
+            restore_binary_backup "$_backup" "$_backup_mode" || return 2
+            rm -f "$_backup" 2>/dev/null || true
+            return 1
+        fi
+
+        mv -f "$_stage" "$DEST_FILE" || {
+            rm -f "$_stage"
+            restore_binary_backup "$_backup" "$_backup_mode" || return 2
+            rm -f "$_backup" 2>/dev/null || true
+            return 1
+        }
+
+        rm -f "$_backup" 2>/dev/null || true
+        return 0
+    fi
+
+    # Первая установка: старого файла нет, поэтому просто сообщаем реальный ENOSPC,
+    # не оставляя мусор/частичный бинарник.
+    return 1
+}
 
 if [ "$IS_PKG_INSTALL" = "1" ]; then
+    stop_service_for_install
     printf "${C}[*] Устанавливаю ${PKG_EXT}-пакет sing-box-extended...${N}\n"
     install_package_file "$ARCHIVE_NAME" || fail "Не удалось установить ${PKG_EXT}-пакет."
     rm -f "$ARCHIVE_NAME" || true
@@ -571,9 +767,20 @@ else
         fail "Бинарник не найден в архиве."
     fi
 
+    chmod +x "$BINARY_PATH" || fail "Не удалось выставить права на загруженный бинарник."
+    if ! verify_binary_version "$BINARY_PATH" "$SELECTED_VER"; then
+        fail "Загруженный бинарник не соответствует ожидаемой версии ${SELECTED_VER}."
+    fi
+
+    stop_service_for_install
     printf "${C}[*] Устанавливаю бинарник...${N}\n"
-    mv -f "$BINARY_PATH" "$DEST_FILE" || fail "Не удалось заменить файл."
-    chmod +x "$DEST_FILE" || fail "Не удалось выставить права на бинарник."
+    install_archive_binary_safely "$BINARY_PATH"
+    _install_rc=$?
+    if [ "$_install_rc" -eq 2 ]; then
+        fail "Критическая ошибка: не удалось восстановить предыдущий sing-box после неудачной записи."
+    elif [ "$_install_rc" -ne 0 ]; then
+        fail "Не удалось записать новую версию на целевую файловую систему. Возможно, фактического места действительно недостаточно."
+    fi
 fi
 
 NEW_VERSION=$("$DEST_FILE" version 2>/dev/null | head -n 1 | awk '{print $NF}') || true
