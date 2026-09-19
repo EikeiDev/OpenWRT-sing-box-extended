@@ -599,8 +599,11 @@ fi
 if [ -z "$WORK_DIR" ]; then
     RAM_FREE_MB=$(( $(get_free_space_kb "/tmp") / 1024 ))
     DISK_FREE_MB=$(( $(get_free_space_kb "$HOME_DIR") / 1024 ))
-    fail "Недостаточно свободного места для установки. В /tmp (ОЗУ) доступно: ${RAM_FREE_MB} МБ, в $HOME_DIR (диск) доступно: ${DISK_FREE_MB} МБ. Требуется минимум: $((REQ_TEMP_KB / 1024)) МБ."
+    # Вместо fail выводим предупреждение и принудительно создаем папку в RAM
+    printf "${Y}[!] UBIFS/NAND сжатие активно. Игнорируем панику df. Пробуем ставить напрямую...${N}\n"
+    WORK_DIR="/tmp/sing-box-install"
 fi
+
 
 rm -rf "$WORK_DIR" || true
 mkdir -p "$WORK_DIR" || fail "Не удалось создать временную директорию $WORK_DIR."
