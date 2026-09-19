@@ -4,6 +4,30 @@
 
 Установщик автоматически определяет OpenWrt, пакетный менеджер, архитектуру, наличие Podkop, состояние сервиса, доступную RAM и свободное место во flash-памяти, после чего выбирает подходящий сценарий установки.
 
+## 🚀 Использование
+
+### Однострочная установка через `wget`
+
+```sh
+sh <(wget -qO- https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh)
+```
+
+### Однострочная установка через `curl`
+
+```sh
+sh <(curl -sSL https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh)
+```
+
+### Ручной запуск
+
+```sh
+wget -O install.sh https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+Установщик необходимо запускать от имени `root`.
+
 ## ✨ Возможности
 
 - 🔄 **Интерактивный выбор версии** — получает стабильные релизы с GitHub и предлагает 3 последних доступных версии.
@@ -150,30 +174,6 @@ Flash-память: 72 МБ всего · ~36 МБ свободно
 Для режима `APK + Compressed` обычный бинарник из установленного APK остаётся рабочей базой до момента успешной проверки compressed-бинарника. Если optional compressed-этап не удаётся скачать, распаковать или запустить, установка продолжается с обычным бинарником из APK.
 
 После фактической необратимой замены бинарника автоматический rollback не выполняется.
-
-## 🚀 Использование
-
-### Однострочная установка через `wget`
-
-```sh
-sh <(wget -qO- https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh)
-```
-
-### Однострочная установка через `curl`
-
-```sh
-sh <(curl -sSL https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh)
-```
-
-### Ручной запуск
-
-```sh
-wget -O install.sh https://raw.githubusercontent.com/EikeiDev/OpenWRT-sing-box-extended/refs/heads/main/install.sh
-chmod +x install.sh
-./install.sh
-```
-
-Установщик необходимо запускать от имени `root`.
 
 ## 📋 Пример интерфейса: OpenWrt + APK
 
