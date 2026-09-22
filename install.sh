@@ -9,8 +9,6 @@ DEST_FILE="/usr/bin/sing-box"
 REAL_BIN="/usr/libexec/sing-box-core"
 VERSION_CACHE="/etc/sing-box-version.cache"
 WORK_DIR="/tmp/sing-box-install"
-SERVICE_STOPPED=0
-ZB_STOPPED=0
 
 R="\033[1;31m"
 G="\033[1;32m"
@@ -82,11 +80,6 @@ printf "  Архитектура:  ${Y}%s${N} -> ${Y}%s${N}\n" "$DISTRIB_ARCH" "
 printf "  Менеджер:     ${Y}%s${N}\n" "$PKG_MANAGER"
 printf "  Сервис:       ${Y}%s${N}\n\n" "$SERVICE_NAME"
 
-printf "${C}[*] Проверка подключения к сети...${N}\n"
-if ! $FETCH "https://ghproxy.net/" >/dev/null 2>&1; then
-    fail "Отсутствует подключение к интернету или недоступен шлюз ghproxy.net."
-fi
-
 printf "${C}[*] Запрашиваю список релизов...${N}\n"
 if echo "$FETCH" | grep -q "curl"; then
     API_RESPONSE=$($FETCH -H "$AUTH_HEADER" "$API_URL" 2>/dev/null)
@@ -94,7 +87,7 @@ else
     API_RESPONSE=$($FETCH --header="$AUTH_HEADER" "$API_URL" 2>/dev/null)
 fi
 
-[ -z "$API_RESPONSE" ] && fail "Не удалось получить ответ от GitHub API."
+[ -z "$API_RESPONSE" ] && fail "Не удалось получить ответ от GitHub API. Проверьте интернет."
 
 if command -v jsonfilter >/dev/null 2>&1; then
     RELEASES=$(echo "$API_RESPONSE" | jsonfilter -e '@[*].tag_name' | grep -viE "rc|beta|alpha" | head -n 3)
@@ -215,7 +208,12 @@ FILE_NAME=$(basename "$DOWNLOAD_URL")
 PROXIED_URL="${PROXY_PREFIX}${DOWNLOAD_URL}"
 
 printf "\n${C}[*] Скачиваю...${N}\n"
-$DOWNLOAD "$FILE_NAME" "$PROXIED_URL" || fail "Сбой при скачивании файла."
+if ! $DOWNLOAD "$FILE_NAME" "$DOWNLOAD_URL"; then
+    printf "${Y}[!] Ошибка прямого скачивания. Пробую через зеркало (ghproxy)...${N}\n"
+    if ! $DOWNLOAD "$FILE_NAME" "$PROXIED_URL"; then
+        fail "Сбой при скачивании файла ни напрямую, ни через зеркало."
+    fi
+fi
 [ ! -s "$FILE_NAME" ] && fail "Скачанный файл пуст."
 
 stop_service() {
