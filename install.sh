@@ -9,6 +9,7 @@ DEST_FILE="/usr/bin/sing-box"
 REAL_BIN="/usr/libexec/sing-box-core"
 VERSION_CACHE="/etc/sing-box-version.cache"
 WORK_DIR="/tmp/sing-box-install"
+DNS_RESTORE=0
 
 R="\033[1;31m"
 G="\033[1;32m"
@@ -16,10 +17,21 @@ Y="\033[1;33m"
 C="\033[1;36m"
 N="\033[0m"
 
-trap 'printf "\n${R}[!] Установка прервана.${N}\n"; rm -rf "$WORK_DIR"; [ "$SERVICE_STOPPED" = "1" ] && /etc/init.d/"$SERVICE_NAME" start >/dev/null 2>&1; [ "$ZB_STOPPED" = "1" ] && /etc/init.d/zeroblock start >/dev/null 2>&1; exit 1' INT TERM
+restore_dns() {
+    if [ "$DNS_RESTORE" = "1" ]; then
+        printf "${C}[*] Восстанавливаю настройки DNS (Ignore resolv = 1)...${N}\n"
+        uci set dhcp.@dnsmasq[0].noresolv='1'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+        DNS_RESTORE=0
+    fi
+}
+
+trap 'printf "\n${R}[!] Установка прервана.${N}\n"; restore_dns; rm -rf "$WORK_DIR"; [ "$SERVICE_STOPPED" = "1" ] && /etc/init.d/"$SERVICE_NAME" start >/dev/null 2>&1; [ "$ZB_STOPPED" = "1" ] && /etc/init.d/zeroblock start >/dev/null 2>&1; exit 1' INT TERM
 
 fail() {
     printf "${R}[!] Ошибка: %s${N}\n" "$1"
+    restore_dns
     rm -rf "$WORK_DIR"
     [ "$SERVICE_STOPPED" = "1" ] && /etc/init.d/"$SERVICE_NAME" start >/dev/null 2>&1
     [ "$ZB_STOPPED" = "1" ] && /etc/init.d/zeroblock start >/dev/null 2>&1
@@ -87,6 +99,24 @@ else
     API_RESPONSE=$($FETCH --header="$AUTH_HEADER" "$API_URL" 2>/dev/null)
 fi
 
+if [ -z "$API_RESPONSE" ]; then
+    OLD_NORESOLV=$(uci get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
+    if [ "$OLD_NORESOLV" = "1" ]; then
+        printf "${Y}[!] GitHub API недоступен. Пробую временно пустить DNS-трафик через провайдера...${N}\n"
+        uci set dhcp.@dnsmasq[0].noresolv='0'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+        DNS_RESTORE=1
+        sleep 3
+        
+        if echo "$FETCH" | grep -q "curl"; then
+            API_RESPONSE=$($FETCH -H "$AUTH_HEADER" "$API_URL" 2>/dev/null)
+        else
+            API_RESPONSE=$($FETCH --header="$AUTH_HEADER" "$API_URL" 2>/dev/null)
+        fi
+    fi
+fi
+
 [ -z "$API_RESPONSE" ] && fail "Не удалось получить ответ от GitHub API. Проверьте интернет."
 
 if command -v jsonfilter >/dev/null 2>&1; then
@@ -108,7 +138,7 @@ printf "  ${Y}0)${N} Отмена\n"
 printf "\n${C}[>] Введите номер (0-$((i-1))): ${N}"
 read -r choice
 
-[ "$choice" = "0" ] && { printf "${G}[*] Отменено.${N}\n"; exit 0; }
+[ "$choice" = "0" ] && { printf "${G}[*] Отменено.${N}\n"; restore_dns; exit 0; }
 
 SELECTED_TAG=$(echo "$RELEASES" | sed -n "${choice}p")
 [ -z "$SELECTED_TAG" ] && fail "Неверный выбор."
@@ -133,24 +163,52 @@ fi
 COMPRESSED_URL=$(echo "$URLS" | grep "linux-$ARCH_SUFFIX-compressed\.tar\.gz" | head -n 1)
 NORMAL_URL=$(echo "$URLS" | grep "linux-$ARCH_SUFFIX\.tar\.gz" | grep -v "compressed" | head -n 1)
 
+MEM_TOTAL=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+[ -z "$MEM_TOTAL" ] && MEM_TOTAL=262144
+if [ "$MEM_TOTAL" -lt 204800 ]; then
+    ROUTER_TYPE="weak"
+else
+    ROUTER_TYPE="strong"
+fi
+
 printf "\n${C}Доступные варианты установки для $ARCH_SUFFIX:${N}\n"
 OPT_NUM=1
 HAS_APK=0
 HAS_CMP=0
 HAS_NRM=0
+DEFAULT_OPT=1
 
 if [ -n "$APK_URL" ]; then
-    printf "  ${Y}%d)${N} APK-пакет (Стандартная установка)\n" "$OPT_NUM"
+    if [ "$ROUTER_TYPE" = "strong" ]; then
+        printf "  ${Y}%d)${N} APK-пакет (⭐ Рекомендуется: штатная установка менеджером)\n" "$OPT_NUM"
+        DEFAULT_OPT=$OPT_NUM
+    else
+        printf "  ${Y}%d)${N} APK-пакет (Стандартная пакетная установка)\n" "$OPT_NUM"
+    fi
     HAS_APK=$OPT_NUM
     OPT_NUM=$((OPT_NUM + 1))
 fi
 if [ -n "$COMPRESSED_URL" ]; then
-    printf "  ${Y}%d)${N} Сжатая версия (Рекомендуется для слабых роутеров: экономит место и защищает от вылетов)\n" "$OPT_NUM"
+    if [ "$ROUTER_TYPE" = "weak" ]; then
+        printf "  ${Y}%d)${N} Сжатая версия (⭐ Рекомендуется для вашего роутера: защита от вылетов ОЗУ)\n" "$OPT_NUM"
+        DEFAULT_OPT=$OPT_NUM
+    else
+        printf "  ${Y}%d)${N} Сжатая версия (Экономит ПЗУ, но дополнительно расходует ОЗУ)\n" "$OPT_NUM"
+    fi
     HAS_CMP=$OPT_NUM
     OPT_NUM=$((OPT_NUM + 1))
 fi
 if [ -n "$NORMAL_URL" ]; then
-    printf "  ${Y}%d)${N} Обычная версия (Стандартный архив, если роутер мощный)\n" "$OPT_NUM"
+    if [ "$ROUTER_TYPE" = "strong" ]; then
+        if [ "$HAS_APK" -eq 0 ]; then
+            printf "  ${Y}%d)${N} Обычная версия (⭐ Рекомендуется для вашего роутера: макс. стабильность)\n" "$OPT_NUM"
+            DEFAULT_OPT=$OPT_NUM
+        else
+            printf "  ${Y}%d)${N} Обычная версия (Стандартный архив .tar.gz)\n" "$OPT_NUM"
+        fi
+    else
+        printf "  ${Y}%d)${N} Обычная версия (Требует много места во flash-памяти)\n" "$OPT_NUM"
+    fi
     HAS_NRM=$OPT_NUM
     OPT_NUM=$((OPT_NUM + 1))
 fi
@@ -160,9 +218,9 @@ if [ "$OPT_NUM" -eq 1 ]; then
 fi
 
 if [ "$OPT_NUM" -gt 2 ]; then
-    printf "\n${C}[>] Выберите вариант (по умолчанию 1): ${N}"
+    printf "\n${C}[>] Выберите вариант (по умолчанию %d): ${N}" "$DEFAULT_OPT"
     read -r fmt_choice
-    [ -z "$fmt_choice" ] && fmt_choice=1
+    [ -z "$fmt_choice" ] && fmt_choice=$DEFAULT_OPT
 else
     fmt_choice=1
 fi
@@ -299,6 +357,7 @@ NEW_VER=$("$DEST_FILE" version 2>/dev/null | head -n 1 | awk '{print $NF}')
 
 cd /
 rm -rf "$WORK_DIR"
+restore_dns
 
 printf "${C}[*] Запускаю сервис...${N}\n"
 /etc/init.d/"$SERVICE_NAME" start >/dev/null 2>&1 || printf "${Y}[!] Не удалось запустить службу. Проверьте логи.${N}\n"
